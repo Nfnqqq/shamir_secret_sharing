@@ -1,0 +1,29 @@
+# --- Build & Dependencies ---
+node_modules/
+dist/
+build/
+out/
+.next/
+vendor/
+
+# --- Environment & Secrets ---
+.env
+.env.local
+.env.*
+*.secret
+credentials.json
+keys/
+
+# --- Logs & Temp ---
+*.log
+*.tmp
+temp/
+tmp/
+*.swp
+
+# --- Project Specifics ---
+# Exclude heavy assets or documentation
+assets/images/
+docs/old-specs/
+scratchpad/
+*.csv

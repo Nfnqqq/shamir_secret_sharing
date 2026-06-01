@@ -1,0 +1,13 @@
+# Build artifacts
+ssss
+ssss-split
+ssss-combine
+*.o
+*.exe
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
