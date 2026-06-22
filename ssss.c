@@ -1,4 +1,5 @@
 #include "ssss.h"
+#include "bip39.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,23 +8,34 @@
 
 /*
  * Fixed primes for paper-friendly format (no need to record prime)
- * Version 1: 256-bit  - for secrets up to 192 bits (~24 chars)
- * Version 2: 512-bit  - for secrets up to 448 bits (~56 chars)
- * Version 3: 1536-bit - for secrets up to 1472 bits (~184 chars, covers 24-word seeds)
+ * Version 1: 256-bit  - for 12/15-word BIP39 or secrets up to 192 bits (~24 chars) - ~16 groups
+ * Version 2: 320-bit  - for 18/21/24-word BIP39 (up to 264 bits) - ~19 groups
+ * Version 3: 512-bit  - for secrets up to 448 bits (~56 chars) - ~31 groups
+ * Version 4: 1536-bit - for secrets up to 1472 bits (~184 chars) - ~92 groups
  * These are verifiable primes: 2^n - k for small k
  */
 const char *FIXED_PRIMES[] = {
-    /* V1: 2^256 - 189 (256-bit prime) */
+    /* V1: 2^256 - 189 (256-bit prime) - for 12/15 word BIP39 */
     "115792089237316195423570985008687907853269984665640564039457584007913129639747",
-    /* V2: 2^512 - 38117 (512-bit prime) */
+    /* V2: 2^320 - 197 (320-bit prime) - for 18/21/24 word BIP39 */
+    "2135987035920910082395021706169552114602704522356652769947041607822219725780640550022962086936379",
+    /* V3: 2^512 - 38117 (512-bit prime) */
     "13407807929942597099574024998205846127479365820592393377723561443721764030073546976801874298166903427690031858186486050853753882811946569946433649006084171",
-    /* V3: 2^1536 - 1177 (1536-bit prime, covers 24-word BIP39 seeds with margin) */
+    /* V4: 2^1536 - 1177 (1536-bit prime, for long text secrets) */
     "2410312426921032588552076022197566074856950548502459942654116941958108831682612228890093858261341614673227141477904012196503648957050582631942730706805009223062734745341073406696246014589361659774041027169249453200378729434170325843778659198143763193776859869524088940195577346119843545301547043747207749969763750084308926339295559968882457872412993810129130294592999947926365264059284647209730384947211681434464714438488520940127459844288859336526896320919633919"
 };
 
 int get_prime_version(int secret_bits) {
-    (void)secret_bits;  /* Always use V3 for simplicity */
-    return 3;
+    /* Select smallest prime that can handle the secret:
+     * V1: 256-bit  - for secrets up to 192 bits - ~16 five-digit groups
+     * V2: 320-bit  - for secrets up to 264 bits - ~19 five-digit groups
+     * V3: 512-bit  - for secrets up to 448 bits - ~31 five-digit groups
+     * V4: 1536-bit - for secrets up to 1472 bits - ~92 five-digit groups
+     */
+    if (secret_bits <= 192) return 1;
+    if (secret_bits <= 264) return 2;
+    if (secret_bits <= 448) return 3;
+    return 4;
 }
 
 void get_fixed_prime(mpz_t prime, int version) {
@@ -97,6 +109,8 @@ void ssss_ctx_init(ssss_ctx_t *ctx) {
     ctx->threshold = 0;
     ctx->num_shares = 0;
     ctx->shares = NULL;
+    ctx->is_bip39 = 0;
+    ctx->bip39_words = 0;
     mpz_init(ctx->prime);
 }
 
@@ -128,13 +142,29 @@ int ssss_split_ex(ssss_ctx_t *ctx, const char *secret, int threshold, int num_sh
 
     ctx->threshold = threshold;
     ctx->num_shares = num_shares;
+    ctx->is_bip39 = 0;
+    ctx->bip39_words = 0;
 
-    /* Convert secret to big integer */
+    /* Check if secret is a BIP39 mnemonic */
     mpz_t secret_int;
     mpz_init(secret_int);
-    mpz_import(secret_int, secret_len, 1, 1, 0, 0, secret);
+    int secret_bits;
+    int word_count = 0;
 
-    int secret_bits = mpz_sizeinbase(secret_int, 2);
+    if (is_bip39_mnemonic(secret, &word_count)) {
+        /* Encode BIP39 compactly: 11 bits per word */
+        if (bip39_encode(secret_int, secret) != 0) {
+            mpz_clear(secret_int);
+            return -1;
+        }
+        ctx->is_bip39 = 1;
+        ctx->bip39_words = word_count;
+        secret_bits = bip39_bits_needed(word_count);
+    } else {
+        /* Regular secret: import as raw bytes */
+        mpz_import(secret_int, secret_len, 1, 1, 0, 0, secret);
+        secret_bits = mpz_sizeinbase(secret_int, 2);
+    }
 
     if (use_fixed_prime) {
         /* Use fixed prime based on secret size */
@@ -243,6 +273,68 @@ int ssss_combine(char *secret, size_t secret_len, share_t *shares, int num_share
     return 0;
 }
 
+/* BIP39-aware combine: if bip39_words > 0, decode result as BIP39 mnemonic */
+int ssss_combine_bip39(char *secret, size_t secret_len, share_t *shares, int num_shares, mpz_t prime, int bip39_words) {
+    mpz_t result, term, num, den, inv, xi, xj;
+    mpz_inits(result, term, num, den, inv, xi, xj, NULL);
+    mpz_set_ui(result, 0);
+
+    for (int i = 0; i < num_shares; i++) {
+        mpz_set_ui(num, 1);
+        mpz_set_ui(den, 1);
+        mpz_set_ui(xi, shares[i].index);
+
+        for (int j = 0; j < num_shares; j++) {
+            if (i == j) continue;
+            mpz_set_ui(xj, shares[j].index);
+
+            mpz_sub(term, prime, xj);
+            mpz_mul(num, num, term);
+            mpz_mod(num, num, prime);
+
+            mpz_sub(term, xi, xj);
+            mpz_mod(term, term, prime);
+            mpz_mul(den, den, term);
+            mpz_mod(den, den, prime);
+        }
+
+        if (mpz_invert(inv, den, prime) == 0) {
+            mpz_clears(result, term, num, den, inv, xi, xj, NULL);
+            return -1;
+        }
+
+        mpz_mul(term, shares[i].value, num);
+        mpz_mod(term, term, prime);
+        mpz_mul(term, term, inv);
+        mpz_mod(term, term, prime);
+
+        mpz_add(result, result, term);
+        mpz_mod(result, result, prime);
+    }
+
+    int ret;
+    if (bip39_words > 0) {
+        /* Decode as BIP39 mnemonic */
+        ret = bip39_decode(secret, secret_len, result, bip39_words);
+    } else {
+        /* Regular byte export */
+        size_t count;
+        unsigned char *bytes = mpz_export(NULL, &count, 1, 1, 0, 0, result);
+        if (count >= secret_len) {
+            free(bytes);
+            ret = -1;
+        } else {
+            memcpy(secret, bytes, count);
+            secret[count] = '\0';
+            free(bytes);
+            ret = 0;
+        }
+    }
+
+    mpz_clears(result, term, num, den, inv, xi, xj, NULL);
+    return ret;
+}
+
 int share_to_string(char *buf, size_t buf_len, const share_t *share, const mpz_t prime) {
     char *prime_hex = mpz_get_str(NULL, 16, prime);
     char *value_hex = mpz_get_str(NULL, 16, share->value);
@@ -276,16 +368,19 @@ static void format_grouped(char *out, const char *digits, int group_size) {
     out[j] = '\0';
 }
 
-void print_paper_share(int index, int total, int threshold, const share_t *share, int prime_version) {
+void print_paper_share_ex(int index, int total, int threshold, const share_t *share, int prime_version, int is_bip39, int bip39_words) {
     char *value_dec = mpz_get_str(NULL, 10, share->value);
     size_t value_len = strlen(value_dec);
     char *value_fmt = malloc(value_len * 2);
     format_grouped(value_fmt, value_dec, 5);
 
-    (void)prime_version;  /* Always V3, no need to display */
     printf("\n");
     printf("┌────────────────────────────────────────┐\n");
-    printf("│ SHARE %d of %d              (need %d)  │\n", index, total, threshold);
+    if (is_bip39) {
+        printf("│ SHARE %d of %d  B%d          (need %d)  │\n", index, total, bip39_words, threshold);
+    } else {
+        printf("│ SHARE %d of %d  V%d          (need %d)  │\n", index, total, prime_version, threshold);
+    }
     printf("├────────────────────────────────────────┤\n");
 
     /* Print value in lines of ~38 chars */
@@ -306,6 +401,10 @@ void print_paper_share(int index, int total, int threshold, const share_t *share
 
     free(value_dec);
     free(value_fmt);
+}
+
+void print_paper_share(int index, int total, int threshold, const share_t *share, int prime_version) {
+    print_paper_share_ex(index, total, threshold, share, prime_version, 0, 0);
 }
 
 int string_to_share(share_t *share, mpz_t prime_out, const char *str) {

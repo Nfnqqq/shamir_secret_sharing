@@ -11,3 +11,4 @@ ssss-combine
 # IDE
 .vscode/
 .idea/
+*.txt
