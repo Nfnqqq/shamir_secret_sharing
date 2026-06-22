@@ -1,5 +1,6 @@
 #include "ssss.h"
 #include "bip39.h"
+#include "slip39.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -111,6 +112,8 @@ void ssss_ctx_init(ssss_ctx_t *ctx) {
     ctx->shares = NULL;
     ctx->is_bip39 = 0;
     ctx->bip39_words = 0;
+    ctx->is_slip39 = 0;
+    ctx->slip39_words = 0;
     mpz_init(ctx->prime);
 }
 
@@ -144,8 +147,10 @@ int ssss_split_ex(ssss_ctx_t *ctx, const char *secret, int threshold, int num_sh
     ctx->num_shares = num_shares;
     ctx->is_bip39 = 0;
     ctx->bip39_words = 0;
+    ctx->is_slip39 = 0;
+    ctx->slip39_words = 0;
 
-    /* Check if secret is a BIP39 mnemonic */
+    /* Check if secret is a BIP39 or SLIP39 mnemonic */
     mpz_t secret_int;
     mpz_init(secret_int);
     int secret_bits;
@@ -160,6 +165,15 @@ int ssss_split_ex(ssss_ctx_t *ctx, const char *secret, int threshold, int num_sh
         ctx->is_bip39 = 1;
         ctx->bip39_words = word_count;
         secret_bits = bip39_bits_needed(word_count);
+    } else if (is_slip39_mnemonic(secret, &word_count)) {
+        /* Encode SLIP39 compactly: 10 bits per word */
+        if (slip39_encode(secret_int, secret) != 0) {
+            mpz_clear(secret_int);
+            return -1;
+        }
+        ctx->is_slip39 = 1;
+        ctx->slip39_words = word_count;
+        secret_bits = slip39_bits_needed(word_count);
     } else {
         /* Regular secret: import as raw bytes */
         mpz_import(secret_int, secret_len, 1, 1, 0, 0, secret);
@@ -335,6 +349,71 @@ int ssss_combine_bip39(char *secret, size_t secret_len, share_t *shares, int num
     return ret;
 }
 
+/* Combined mnemonic-aware combine: supports both BIP39 and SLIP39 */
+int ssss_combine_mnemonic(char *secret, size_t secret_len, share_t *shares, int num_shares, mpz_t prime, int bip39_words, int slip39_words) {
+    mpz_t result, term, num, den, inv, xi, xj;
+    mpz_inits(result, term, num, den, inv, xi, xj, NULL);
+    mpz_set_ui(result, 0);
+
+    for (int i = 0; i < num_shares; i++) {
+        mpz_set_ui(num, 1);
+        mpz_set_ui(den, 1);
+        mpz_set_ui(xi, shares[i].index);
+
+        for (int j = 0; j < num_shares; j++) {
+            if (i == j) continue;
+            mpz_set_ui(xj, shares[j].index);
+
+            mpz_sub(term, prime, xj);
+            mpz_mul(num, num, term);
+            mpz_mod(num, num, prime);
+
+            mpz_sub(term, xi, xj);
+            mpz_mod(term, term, prime);
+            mpz_mul(den, den, term);
+            mpz_mod(den, den, prime);
+        }
+
+        if (mpz_invert(inv, den, prime) == 0) {
+            mpz_clears(result, term, num, den, inv, xi, xj, NULL);
+            return -1;
+        }
+
+        mpz_mul(term, shares[i].value, num);
+        mpz_mod(term, term, prime);
+        mpz_mul(term, term, inv);
+        mpz_mod(term, term, prime);
+
+        mpz_add(result, result, term);
+        mpz_mod(result, result, prime);
+    }
+
+    int ret;
+    if (bip39_words > 0) {
+        /* Decode as BIP39 mnemonic */
+        ret = bip39_decode(secret, secret_len, result, bip39_words);
+    } else if (slip39_words > 0) {
+        /* Decode as SLIP39 mnemonic */
+        ret = slip39_decode(secret, secret_len, result, slip39_words);
+    } else {
+        /* Regular byte export */
+        size_t count;
+        unsigned char *bytes = mpz_export(NULL, &count, 1, 1, 0, 0, result);
+        if (count >= secret_len) {
+            free(bytes);
+            ret = -1;
+        } else {
+            memcpy(secret, bytes, count);
+            secret[count] = '\0';
+            free(bytes);
+            ret = 0;
+        }
+    }
+
+    mpz_clears(result, term, num, den, inv, xi, xj, NULL);
+    return ret;
+}
+
 int share_to_string(char *buf, size_t buf_len, const share_t *share, const mpz_t prime) {
     char *prime_hex = mpz_get_str(NULL, 16, prime);
     char *value_hex = mpz_get_str(NULL, 16, share->value);
@@ -368,7 +447,7 @@ static void format_grouped(char *out, const char *digits, int group_size) {
     out[j] = '\0';
 }
 
-void print_paper_share_ex(int index, int total, int threshold, const share_t *share, int prime_version, int is_bip39, int bip39_words) {
+void print_paper_share_full(int index, int total, int threshold, const share_t *share, int prime_version, int is_bip39, int bip39_words, int is_slip39, int slip39_words) {
     char *value_dec = mpz_get_str(NULL, 10, share->value);
     size_t value_len = strlen(value_dec);
     char *value_fmt = malloc(value_len * 2);
@@ -378,6 +457,8 @@ void print_paper_share_ex(int index, int total, int threshold, const share_t *sh
     printf("┌────────────────────────────────────────┐\n");
     if (is_bip39) {
         printf("│ SHARE %d of %d  B%d          (need %d)  │\n", index, total, bip39_words, threshold);
+    } else if (is_slip39) {
+        printf("│ SHARE %d of %d  S%d          (need %d)  │\n", index, total, slip39_words, threshold);
     } else {
         printf("│ SHARE %d of %d  V%d          (need %d)  │\n", index, total, prime_version, threshold);
     }
@@ -401,6 +482,10 @@ void print_paper_share_ex(int index, int total, int threshold, const share_t *sh
 
     free(value_dec);
     free(value_fmt);
+}
+
+void print_paper_share_ex(int index, int total, int threshold, const share_t *share, int prime_version, int is_bip39, int bip39_words) {
+    print_paper_share_full(index, total, threshold, share, prime_version, is_bip39, bip39_words, 0, 0);
 }
 
 void print_paper_share(int index, int total, int threshold, const share_t *share, int prime_version) {

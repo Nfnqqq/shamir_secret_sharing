@@ -25,6 +25,8 @@ typedef struct {
     share_t *shares;
     int is_bip39;      /* 1 if BIP39 encoding was used */
     int bip39_words;   /* Number of BIP39 words (12, 15, 18, 21, 24) */
+    int is_slip39;     /* 1 if SLIP39 encoding was used */
+    int slip39_words;  /* Number of SLIP39 words */
 } ssss_ctx_t;
 
 /* Initialize/cleanup context */
@@ -46,8 +48,10 @@ int get_security_level(const char *secret);
 /* Paper-friendly output (version=0 shows full prime, version>0 shows "V1/V2/V3/V4") */
 void print_paper_share(int index, int total, int threshold, const share_t *share, int prime_version);
 void print_paper_share_ex(int index, int total, int threshold, const share_t *share, int prime_version, int is_bip39, int bip39_words);
+void print_paper_share_full(int index, int total, int threshold, const share_t *share, int prime_version, int is_bip39, int bip39_words, int is_slip39, int slip39_words);
 
-/* BIP39-aware combine: if bip39_words > 0, decode result as BIP39 mnemonic */
+/* BIP39/SLIP39-aware combine: if bip39_words > 0, decode as BIP39; if slip39_words > 0, decode as SLIP39 */
 int ssss_combine_bip39(char *secret, size_t secret_len, share_t *shares, int num_shares, mpz_t prime, int bip39_words);
+int ssss_combine_mnemonic(char *secret, size_t secret_len, share_t *shares, int num_shares, mpz_t prime, int bip39_words, int slip39_words);
 
 #endif /* SSSS_H */

@@ -56,7 +56,7 @@ static int do_split(int threshold, int num_shares) {
     }
 
     for (int i = 0; i < num_shares; i++) {
-        print_paper_share_ex(i + 1, num_shares, threshold, &ctx.shares[i], prime_version, ctx.is_bip39, ctx.bip39_words);
+        print_paper_share_full(i + 1, num_shares, threshold, &ctx.shares[i], prime_version, ctx.is_bip39, ctx.bip39_words, ctx.is_slip39, ctx.slip39_words);
     }
 
     memset(secret, 0, sizeof(secret));
@@ -92,9 +92,10 @@ static int do_combine(int threshold) {
     char line[4096];
     int share_count = 0;
     int bip39_words = 0;
+    int slip39_words = 0;
 
-    /* Ask for mode: BIP39 word count or version */
-    printf("Mode (B12/B15/B18/B21/B24 for BIP39, or V1/V2/V3/V4 for text): ");
+    /* Ask for mode: BIP39 word count, SLIP39 word count, or version */
+    printf("Mode (B12/B15/B18/B21/B24 for BIP39, S<n> for SLIP39, or V1/V2/V3/V4 for text): ");
     fflush(stdout);
     if (read_line(line, sizeof(line)) != 0) {
         fprintf(stderr, "Error reading mode\n");
@@ -113,6 +114,19 @@ static int do_combine(int threshold) {
         /* Select prime based on word count */
         if (bip39_words <= 15) version = 1;      /* 256-bit */
         else version = 2;                         /* 320-bit */
+    } else if (line[0] == 'S' || line[0] == 's') {
+        /* SLIP39 mode */
+        slip39_words = atoi(line + 1);
+        if (slip39_words < 3) {
+            fprintf(stderr, "Invalid SLIP39 word count (must be at least 3)\n");
+            goto error;
+        }
+        /* Select prime based on word count (10 bits per word) */
+        int bits_needed = slip39_words * 10;
+        if (bits_needed <= 192) version = 1;
+        else if (bits_needed <= 264) version = 2;
+        else if (bits_needed <= 448) version = 3;
+        else version = 4;
     } else if (line[0] == 'V' || line[0] == 'v') {
         version = atoi(line + 1);
     } else {
@@ -157,7 +171,7 @@ static int do_combine(int threshold) {
     }
 
     char secret[MAX_SECRET_LEN + 1];
-    if (ssss_combine_bip39(secret, sizeof(secret), shares, threshold, prime, bip39_words) != 0) {
+    if (ssss_combine_mnemonic(secret, sizeof(secret), shares, threshold, prime, bip39_words, slip39_words) != 0) {
         fprintf(stderr, "Error combining shares\n");
         goto error;
     }

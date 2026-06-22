@@ -3,8 +3,8 @@ CFLAGS = -Wall -Wextra -O2 -I/opt/homebrew/include
 LDFLAGS = -L/opt/homebrew/lib -lgmp
 
 BINARY = ssss
-SOURCES = main.c ssss.c bip39.c
-HEADERS = ssss.h bip39.h
+SOURCES = main.c ssss.c bip39.c slip39.c
+HEADERS = ssss.h bip39.h slip39.h
 
 .PHONY: all clean install
 
