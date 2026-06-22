@@ -1,9 +1,12 @@
 #include "ssss.h"
+#include "bip39.h"
+#include "slip39.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <libgen.h>
+#include <ctype.h>
 
 static void print_usage_split(const char *prog) {
     fprintf(stderr, "Usage: %s -t <threshold> -n <num_shares>\n", prog);
@@ -32,6 +35,45 @@ static int read_secret(char *buf, size_t buf_len) {
     return 0;
 }
 
+/* Count words in input (space-separated tokens) */
+static int count_words(const char *input) {
+    char *copy = strdup(input);
+    char *saveptr;
+    int count = 0;
+
+    char *token = strtok_r(copy, " \t\n", &saveptr);
+    while (token) {
+        count++;
+        token = strtok_r(NULL, " \t\n", &saveptr);
+    }
+    free(copy);
+    return count;
+}
+
+/* Check if input looks like a mnemonic (all tokens are alphabetic words) */
+static int looks_like_mnemonic(const char *input) {
+    char *copy = strdup(input);
+    char *saveptr;
+    int looks_like = 1;
+    int word_count = 0;
+
+    char *token = strtok_r(copy, " \t\n", &saveptr);
+    while (token && looks_like) {
+        /* Check if token is all alphabetic */
+        for (char *p = token; *p && looks_like; p++) {
+            if (!isalpha(*p)) {
+                looks_like = 0;
+            }
+        }
+        word_count++;
+        token = strtok_r(NULL, " \t\n", &saveptr);
+    }
+    free(copy);
+
+    /* Must have at least 3 words to look like a mnemonic */
+    return looks_like && word_count >= 3;
+}
+
 static int do_split(int threshold, int num_shares) {
     char secret[MAX_SECRET_LEN + 2];
 
@@ -43,6 +85,52 @@ static int do_split(int threshold, int num_shares) {
     if (strlen(secret) == 0) {
         fprintf(stderr, "Error: empty secret\n");
         return 1;
+    }
+
+    /* Validate mnemonic input if it looks like one */
+    if (looks_like_mnemonic(secret)) {
+        int word_count = count_words(secret);
+        char invalid_words[512];
+        int bip39_invalid = bip39_validate(secret, invalid_words, sizeof(invalid_words));
+        int slip39_invalid = slip39_validate(secret, invalid_words, sizeof(invalid_words));
+
+        /* Check if it's a valid BIP39 mnemonic */
+        int is_valid_bip39 = (bip39_invalid == 0) &&
+                             (word_count == 12 || word_count == 15 ||
+                              word_count == 18 || word_count == 21 || word_count == 24);
+
+        /* Check if it's a valid SLIP39 mnemonic */
+        int is_valid_slip39 = (slip39_invalid == 0) && (word_count >= 3);
+
+        if (!is_valid_bip39 && !is_valid_slip39) {
+            fprintf(stderr, "\nWARNING: Input looks like a mnemonic but contains invalid words!\n");
+
+            /* Show which wordlist has fewer invalid words */
+            if (bip39_invalid <= slip39_invalid && bip39_invalid > 0) {
+                bip39_validate(secret, invalid_words, sizeof(invalid_words));
+                fprintf(stderr, "  Invalid BIP39 words: %s\n", invalid_words);
+            }
+            if (slip39_invalid <= bip39_invalid && slip39_invalid > 0) {
+                slip39_validate(secret, invalid_words, sizeof(invalid_words));
+                fprintf(stderr, "  Invalid SLIP39 words: %s\n", invalid_words);
+            }
+
+            if (word_count != 12 && word_count != 15 && word_count != 18 &&
+                word_count != 21 && word_count != 24 && word_count != 20 && word_count != 33) {
+                fprintf(stderr, "  Word count %d is unusual (BIP39: 12/15/18/21/24, SLIP39: typically 20 or 33)\n", word_count);
+            }
+
+            fprintf(stderr, "\n  This will be treated as RAW TEXT, not a mnemonic.\n");
+            fprintf(stderr, "  [C]ontinue as raw text, [A]bort? ");
+            fflush(stderr);
+
+            char line[64];
+            if (fgets(line, sizeof(line), stdin) == NULL || line[0] == 'A' || line[0] == 'a') {
+                fprintf(stderr, "Aborted.\n");
+                return 1;
+            }
+            fprintf(stderr, "  Continuing as raw text...\n\n");
+        }
     }
 
     ssss_ctx_t ctx;
@@ -140,6 +228,7 @@ static int do_combine(int threshold) {
     get_fixed_prime(prime, version);
 
     for (int i = 0; i < threshold; i++) {
+reenter_share:
         printf("Share %d of %d:\n", i + 1, threshold);
 
         printf("  Index: ");
@@ -161,12 +250,56 @@ static int do_combine(int threshold) {
             goto error;
         }
         remove_spaces(line);
+
+        /* Store the value string for checksum calculation */
+        char value_str[4096];
+        strncpy(value_str, line, sizeof(value_str) - 1);
+        value_str[sizeof(value_str) - 1] = '\0';
+
         mpz_init(shares[i].value);
         if (mpz_set_str(shares[i].value, line, 10) != 0) {
             fprintf(stderr, "Error parsing value\n");
             mpz_clear(shares[i].value);
             goto error;
         }
+
+        /* Prompt for and verify checksum */
+        printf("  Checksum: ");
+        fflush(stdout);
+        if (read_line(line, sizeof(line)) != 0) {
+            fprintf(stderr, "Error reading checksum\n");
+            mpz_clear(shares[i].value);
+            goto error;
+        }
+
+        int entered_checksum = atoi(line);
+        int calculated_checksum = calc_checksum(value_str);
+
+        if (entered_checksum != calculated_checksum) {
+            fprintf(stderr, "\n  WARNING: Checksum mismatch!\n");
+            fprintf(stderr, "    Entered:    %02d\n", entered_checksum);
+            fprintf(stderr, "    Calculated: %02d\n", calculated_checksum);
+            fprintf(stderr, "\n  This likely means there's a typo in the share value.\n");
+            fprintf(stderr, "  [R]e-enter share, [C]ontinue anyway, [A]bort? ");
+            fflush(stderr);
+
+            if (read_line(line, sizeof(line)) != 0) {
+                mpz_clear(shares[i].value);
+                goto error;
+            }
+
+            if (line[0] == 'R' || line[0] == 'r') {
+                mpz_clear(shares[i].value);
+                goto reenter_share;
+            } else if (line[0] == 'A' || line[0] == 'a') {
+                fprintf(stderr, "Aborted.\n");
+                mpz_clear(shares[i].value);
+                goto error;
+            }
+            /* Continue anyway if 'C' or anything else */
+            fprintf(stderr, "  Continuing with potentially incorrect share...\n\n");
+        }
+
         share_count++;
     }
 

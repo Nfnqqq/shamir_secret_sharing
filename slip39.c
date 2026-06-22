@@ -1140,3 +1140,37 @@ int slip39_decode(char *mnemonic, size_t max_len, const mpz_t encoded, int word_
 
     return 0;
 }
+
+int slip39_validate(const char *input, char *invalid_words, size_t invalid_words_len) {
+    char *copy = strdup(input);
+    char *saveptr;
+    int invalid_count = 0;
+
+    /* Convert to lowercase for comparison */
+    for (char *p = copy; *p; p++) *p = tolower(*p);
+
+    if (invalid_words && invalid_words_len > 0) {
+        invalid_words[0] = '\0';
+    }
+
+    char *token = strtok_r(copy, " \t\n", &saveptr);
+    while (token) {
+        if (find_word_index(token) < 0) {
+            invalid_count++;
+            if (invalid_words && invalid_words_len > 0) {
+                size_t current_len = strlen(invalid_words);
+                if (current_len > 0 && current_len + 2 < invalid_words_len) {
+                    strcat(invalid_words, ", ");
+                    current_len += 2;
+                }
+                if (current_len + strlen(token) < invalid_words_len) {
+                    strcat(invalid_words, token);
+                }
+            }
+        }
+        token = strtok_r(NULL, " \t\n", &saveptr);
+    }
+
+    free(copy);
+    return invalid_count;
+}

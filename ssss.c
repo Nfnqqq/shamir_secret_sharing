@@ -424,7 +424,7 @@ int share_to_string(char *buf, size_t buf_len, const share_t *share, const mpz_t
 }
 
 /* Calculate checksum: sum of all digits mod 97 */
-static int calc_checksum(const char *digits) {
+int calc_checksum(const char *digits) {
     int sum = 0;
     for (int i = 0; digits[i]; i++) {
         if (digits[i] >= '0' && digits[i] <= '9') {

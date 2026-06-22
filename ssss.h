@@ -54,4 +54,7 @@ void print_paper_share_full(int index, int total, int threshold, const share_t *
 int ssss_combine_bip39(char *secret, size_t secret_len, share_t *shares, int num_shares, mpz_t prime, int bip39_words);
 int ssss_combine_mnemonic(char *secret, size_t secret_len, share_t *shares, int num_shares, mpz_t prime, int bip39_words, int slip39_words);
 
+/* Checksum calculation: sum of all digits mod 97 */
+int calc_checksum(const char *digits);
+
 #endif /* SSSS_H */
